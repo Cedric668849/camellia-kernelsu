@@ -11,6 +11,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
 
     steps:
     - name: 最大化构建空间
@@ -21,6 +22,7 @@ jobs:
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
+        remove-docker-images: 'true'
 
     - name: 检出仓库
       uses: actions/checkout@v4
@@ -28,19 +30,15 @@ jobs:
     - name: 安装编译依赖
       run: |
         sudo apt update
-
-        # 安装基础编译工具
         sudo apt install -y \
           bc bison build-essential ccache curl flex \
           git gnupg gperf liblz4-tool \
           libncurses-dev libsdl1.2-dev libssl-dev \
           libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
-          xsltproc zip zlib1g-dev python3 python3-pip device-tree-compiler wget
+          xsltproc zip zlib1g-dev python3 python3-pip device-tree-compiler wget \
+          gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-        # 安装ARM64交叉编译工具链
-        sudo apt install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-        # 验证GCC版本
+        # 验证GCC
         aarch64-linux-gnu-gcc --version
 
     - name: 设置ccache
@@ -48,225 +46,259 @@ jobs:
       with:
         max-size: "2G"
 
-    - name: 设置工作目录
+    - name: 克隆内核源码（使用浅克隆）
       run: |
-        mkdir -p $HOME/kernel_build
-        echo "KERNEL_DIR=$HOME/kernel_build" >> $GITHUB_ENV
+        cd $HOME
+        echo "开始克隆内核源码（浅克隆以加速）..."
 
-    - name: 克隆内核源码
-      run: |
-        cd $HOME/kernel_build
-        git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b camellia-r-oss kernel --depth=1
-        echo "内核源码克隆完成"
+        # 设置git配置以提高速度
+        git config --global http.postBuffer 524288000
+        git config --global http.lowSpeedLimit 0
+        git config --global http.lowSpeedTime 999999
+        git config --global core.compression 0
+
+        # 使用极浅克隆（只克隆最新提交）
+        timeout 10m git clone \
+          --depth=1 \
+          --single-branch \
+          --branch camellia-r-oss \
+          --no-tags \
+          https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel || {
+            echo "GitHub克隆失败，尝试使用镜像..."
+
+            # 备用方案：使用Gitee镜像（如果有）
+            git clone \
+              --depth=1 \
+              --single-branch \
+              --branch camellia-r-oss \
+              https://gitee.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel || {
+
+                # 最后方案：下载压缩包
+                echo "克隆失败，尝试下载压缩包..."
+                wget -q --show-progress \
+                  https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip
+                unzip -q camellia-r-oss.zip
+                mv Xiaomi_Kernel_OpenSource-camellia-r-oss kernel
+              }
+          }
+
+        echo "内核源码获取完成"
         ls -la kernel/
 
     - name: 克隆KernelSU
       run: |
-        cd $HOME/kernel_build
+        cd $HOME
         if [ -n "${{ github.event.inputs.kernelsu_version }}" ]; then
-          git clone https://github.com/tiann/KernelSU.git -b ${{ github.event.inputs.kernelsu_version }} --depth=1
+          git clone --depth=1 https://github.com/tiann/KernelSU.git -b ${{ github.event.inputs.kernelsu_version }}
         else
-          git clone https://github.com/tiann/KernelSU.git --depth=1
+          git clone --depth=1 https://github.com/tiann/KernelSU.git
         fi
         cd KernelSU
-        echo "KernelSU版本: $(git describe --tags --always)"
-        cd ..
-        echo "检查KernelSU内核模块:"
-        ls -la KernelSU/kernel/
+        echo "KernelSU版本: $(git describe --tags --always || echo 'latest')"
 
-    - name: 集成KernelSU到内核
+    - name: 集成KernelSU
       run: |
-        cd $HOME/kernel_build/kernel
+        cd $HOME/kernel
 
-        # 直接复制KernelSU到drivers目录（避免符号链接权限问题）
-        cp -r ../KernelSU/kernel drivers/kernelsu
+        # 复制KernelSU
+        cp -r $HOME/KernelSU/kernel drivers/kernelsu
 
-        # 验证复制成功
+        # 验证
         if [ -d "drivers/kernelsu" ]; then
-          echo "KernelSU复制成功"
-          ls -la drivers/kernelsu/
+          echo "✅ KernelSU集成成功"
         else
-          echo "错误：KernelSU复制失败"
+          echo "❌ KernelSU集成失败"
           exit 1
         fi
 
-        # 修改Makefile
-        if ! grep -q "kernelsu" drivers/Makefile; then
-          echo 'obj-y += kernelsu/' >> drivers/Makefile
-          echo "已添加kernelsu到Makefile"
-        fi
-
-        # 修改Kconfig
-        if ! grep -q "kernelsu" drivers/Kconfig; then
-          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-          echo "已添加kernelsu到Kconfig"
-        fi
-
-        echo "KernelSU集成完成"
+        # 修改Makefile和Kconfig
+        echo 'obj-y += kernelsu/' >> drivers/Makefile
+        echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
 
     - name: 配置内核
       run: |
-        cd $HOME/kernel_build/kernel
+        cd $HOME/kernel
 
-        # 设置环境变量
         export ARCH=arm64
         export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-        # 禁用栈保护（解决编译器不支持的问题）
-        export KCFLAGS="-w"
-        export CONFIG_CC_STACKPROTECTOR_STRONG=n
-
-        # 使用默认配置
+        # 使用设备配置
         make camellia_defconfig
 
-        # 修改配置：禁用栈保护，启用KernelSU
+        # 禁用栈保护
         scripts/config --disable CONFIG_CC_STACKPROTECTOR_STRONG
         scripts/config --disable CONFIG_CC_STACKPROTECTOR
+
+        # 启用KernelSU
         scripts/config --enable CONFIG_KPROBES
         scripts/config --enable CONFIG_HAVE_KPROBES
         scripts/config --enable CONFIG_KPROBE_EVENTS
-
-        # 手动添加KernelSU配置（如果config工具不识别）
         echo "CONFIG_KSU=y" >> .config
 
         # 更新配置
         make olddefconfig
 
-        echo "验证配置:"
-        grep -E "STACKPROTECTOR|KSU|KPROBES" .config
+        # 验证
+        echo "配置检查:"
+        grep -E "STACKPROTECTOR|KSU|KPROBES" .config || true
 
     - name: 编译内核
       run: |
-        cd $HOME/kernel_build/kernel
+        cd $HOME/kernel
 
-        # 设置编译环境
         export ARCH=arm64
         export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-        export USE_CCACHE=1
-        export CCACHE_DIR=$HOME/.ccache
-
-        # 禁用栈保护
         export KCFLAGS="-w"
         export CONFIG_CC_STACKPROTECTOR_STRONG=n
 
-        # 清理之前的编译（如果有）
-        make clean
+        # 编译
+        echo "开始编译 (使用 $(nproc) 线程)..."
+        make -j$(nproc) Image.gz-dtb 2>&1 | tail -n 200
 
-        echo "开始编译内核（使用$(nproc)个线程）..."
-        make -j$(nproc) Image.gz-dtb 2>&1 | tee build.log || {
-          echo "编译失败，显示最后100行日志:"
-          tail -n 100 build.log
-          exit 1
-        }
-
-        echo "编译完成，检查输出文件:"
+        # 检查输出
         if [ -f arch/arm64/boot/Image.gz-dtb ]; then
-          echo "内核编译成功！"
+          echo "✅ 编译成功!"
           ls -lh arch/arm64/boot/Image.gz-dtb
         else
-          echo "错误：未找到编译输出文件"
+          echo "❌ 编译失败"
           exit 1
         fi
 
-    - name: 准备打包工具
+    - name: 准备产物
       run: |
-        cd ${{ github.workspace }}
+        mkdir -p output
 
-        # 下载magiskboot
+        # 复制内核
+        cp $HOME/kernel/arch/arm64/boot/Image.gz-dtb output/
+
+        # 下载magiskboot（只是打包工具，不是Magisk）
+        echo "下载boot.img打包工具..."
         wget -q https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk-26.4.apk
-        unzip -j Magisk-*.apk 'lib/x86_64/libmagiskboot.so' -d .
-        mv libmagiskboot.so magiskboot
-        chmod +x magiskboot
+        unzip -q -j Magisk-*.apk 'lib/x86_64/libmagiskboot.so' -d output/
+        mv output/libmagiskboot.so output/magiskboot
+        chmod +x output/magiskboot
         rm Magisk-*.apk
 
-        # 创建使用说明
-        cat > README.md << 'END_README'
-        # KernelSU内核使用说明
+        # 创建刷入脚本
+        cat > output/flash.sh << 'FLASH_SCRIPT'
+        #!/bin/bash
+        echo "KernelSU内核刷入工具"
+        echo "===================="
+        echo "注意：这是KernelSU内核，不是Magisk！"
+        echo ""
 
-        ## 关于KernelSU
-        KernelSU是内核级的root方案，与Magisk（Kitsune Mask）的关系：
-        - KernelSU和Magisk是两种不同的root方案
-        - 刷入KernelSU后，不再需要Magisk/Kitsune Mask
-        - KernelSU有自己的管理器APP和模块系统
-        - 原Magisk模块需要转换才能在KernelSU使用
+        if [ ! -f "boot.img" ]; then
+          echo "错误: 请先放入原版boot.img"
+          exit 1
+        fi
 
-        ## 刷入步骤
+        echo "1. 解包boot.img..."
+        ./magiskboot unpack boot.img
 
-        1. 提取原始boot.img:
-           ```
-           adb shell su -c 'dd if=/dev/block/by-name/boot of=/sdcard/boot.img'
-           adb pull /sdcard/boot.img
-           ```
+        echo "2. 替换为KernelSU内核..."
+        cp Image.gz-dtb kernel
 
-        2. 制作新boot.img:
-           ```
-           ./magiskboot unpack boot.img
-           cp Image.gz-dtb kernel
-           ./magiskboot repack boot.img
-           ```
+        echo "3. 重新打包..."
+        ./magiskboot repack boot.img
 
-        3. 刷入新内核:
-           ```
+        echo "4. 完成！"
+        echo "   生成文件: new-boot.img (包含KernelSU)"
+        echo ""
+        echo "刷入命令:"
+        echo "  adb reboot bootloader"
+        echo "  fastboot flash boot new-boot.img"
+        echo "  fastboot reboot"
+        echo ""
+        echo "刷入后请安装KernelSU管理器APP"
+        echo "下载地址: https://github.com/tiann/KernelSU/releases"
+        FLASH_SCRIPT
+
+        chmod +x output/flash.sh
+
+        # 创建说明文件
+        cat > output/README.txt << 'README'
+        KernelSU内核 - 红米Note 10 (camellia)
+        =====================================
+
+        【重要说明】
+        这是KernelSU内核，不是Magisk/Kitsune Mask！
+        magiskboot只是用来打包boot.img的工具。
+
+        【包含文件】
+        - Image.gz-dtb: 编译的KernelSU内核
+        - magiskboot: boot.img打包工具（不含Magisk）
+        - flash.sh: 自动刷入脚本
+
+        【使用步骤】
+        1. 备份原版boot.img
+           adb shell su -c 'dd if=/dev/block/by-name/boot of=/sdcard/boot_backup.img'
+           adb pull /sdcard/boot_backup.img
+
+        2. 将boot_backup.img复制到本目录并改名为boot.img
+
+        3. Linux/Mac运行：
+           ./flash.sh
+
+           Windows手动执行：
+           magiskboot.exe unpack boot.img
+           copy Image.gz-dtb kernel
+           magiskboot.exe repack boot.img
+
+        4. 刷入new-boot.img：
            adb reboot bootloader
            fastboot flash boot new-boot.img
            fastboot reboot
-           ```
 
-        4. 安装KernelSU管理器:
-           - 下载地址: https://github.com/tiann/KernelSU/releases
-           - 安装最新版本的KernelSU.apk
+        5. 安装KernelSU管理器APP
+           下载: https://github.com/tiann/KernelSU/releases
 
-        ## 重要提醒
-        - 刷入前务必备份原始boot.img
-        - 首次使用需要在KernelSU管理器中授予应用root权限
-        - 原Magisk模块不能直接使用，需要适配
-        END_README
-
-    - name: 收集编译产物
-      run: |
-        mkdir -p output
-        cp $HOME/kernel_build/kernel/arch/arm64/boot/Image.gz-dtb output/
-        cp magiskboot output/
-        cp README.md output/
+        【注意事项】
+        - 必须先备份原版boot.img！
+        - 需要解锁Bootloader
+        - KernelSU会替代Magisk/Kitsune Mask
+        - 原Magisk模块需要转换才能使用
+        README
 
         # 创建版本信息
-        cat > output/version.txt << END_VERSION
+        cat > output/version.txt << VERSION
+        编译信息
+        ========
         编译时间: $(date '+%Y-%m-%d %H:%M:%S')
-        设备: 红米Note 10 (camellia)
+        设备型号: 红米Note 10 (camellia)
+        处理器: MediaTek Dimensity 700
+        Android: 11 (R)
         内核源码: camellia-r-oss
-        KernelSU版本: $(cd $HOME/kernel_build/KernelSU && git describe --tags --always)
+        KernelSU版本: $(cd $HOME/KernelSU && git describe --tags --always || echo 'latest')
         编译器: $(aarch64-linux-gnu-gcc --version | head -n1)
-        END_VERSION
+
+        这是KernelSU内核，不包含Magisk！
+        VERSION
 
     - name: 上传编译产物
       uses: actions/upload-artifact@v4
       with:
-        name: kernelsu-camellia-kernel
+        name: KernelSU-Camellia
         path: output/
 
-    - name: 显示编译摘要
+    - name: 显示摘要
       run: |
-        echo "## ✅ 编译成功！" >> $GITHUB_STEP_SUMMARY
+        echo "## ✅ 编译成功!" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📱 设备信息" >> $GITHUB_STEP_SUMMARY
-        echo "- 设备: 红米Note 10 (camellia)" >> $GITHUB_STEP_SUMMARY
+        echo "- 型号: 红米Note 10 (camellia)" >> $GITHUB_STEP_SUMMARY
         echo "- 处理器: MediaTek Dimensity 700" >> $GITHUB_STEP_SUMMARY
+        echo "- 内核大小: $(ls -lh output/Image.gz-dtb | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🎯 KernelSU vs Magisk" >> $GITHUB_STEP_SUMMARY
-        echo "- KernelSU是独立的root方案" >> $GITHUB_STEP_SUMMARY
-        echo "- 不需要Magisk/Kitsune Mask" >> $GITHUB_STEP_SUMMARY
-        echo "- 有专门的KernelSU管理器APP" >> $GITHUB_STEP_SUMMARY
+        echo "### 🎯 重要说明" >> $GITHUB_STEP_SUMMARY
+        echo "- 这是**KernelSU内核**，不是Magisk" >> $GITHUB_STEP_SUMMARY
+        echo "- magiskboot只是打包工具" >> $GITHUB_STEP_SUMMARY
+        echo "- 刷入后需安装KernelSU管理器" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📦 下载内容" >> $GITHUB_STEP_SUMMARY
-        echo "- Image.gz-dtb: 编译的内核" >> $GITHUB_STEP_SUMMARY
-        echo "- magiskboot: 打包工具" >> $GITHUB_STEP_SUMMARY
-        echo "- README.md: 使用说明" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### ⚠️ 注意事项" >> $GITHUB_STEP_SUMMARY
-        echo "1. 备份原始boot.img" >> $GITHUB_STEP_SUMMARY
-        echo "2. 安装KernelSU管理器APP" >> $GITHUB_STEP_SUMMARY
-        echo "3. 原Magisk模块需要转换" >> $GITHUB_STEP_SUMMARY
+        echo "### 📥 使用方法" >> $GITHUB_STEP_SUMMARY
+        echo "1. 下载KernelSU-Camellia.zip" >> $GITHUB_STEP_SUMMARY
+        echo "2. 备份原版boot.img" >> $GITHUB_STEP_SUMMARY
+        echo "3. 运行flash.sh生成new-boot.img" >> $GITHUB_STEP_SUMMARY
+        echo "4. 刷入并安装KernelSU管理器" >> $GITHUB_STEP_SUMMARY
