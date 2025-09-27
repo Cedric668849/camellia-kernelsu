@@ -1,0 +1,128 @@
+name: Build Camellia KernelSU Kernel
+
+on:
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      kernelsu_version:
+        description: 'KernelSU版本标签（留空使用最新）'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+
+    steps:
+    - name: 最大化构建空间
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 512
+        swap-size-mb: 1024
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+
+    - name: 检出仓库
+      uses: actions/checkout@v3
+
+    - name: 安装编译依赖
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          bc bison build-essential ccache curl flex g++-multilib \
+          gcc-multilib git gnupg gperf lib32ncurses5-dev lib32z1-dev \
+          liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev \
+          libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
+          xsltproc zip zlib1g-dev python3 python3-pip device-tree-compiler \
+          gcc-aarch64-linux-gnu wget
+
+    - name: 设置ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        max-size: "2G"
+
+    - name: 克隆内核源码
+      run: |
+        git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b camellia-r-oss kernel --depth=1
+
+    - name: 克隆KernelSU
+      run: |
+        if [ -n "${{ github.event.inputs.kernelsu_version }}" ]; then
+          git clone https://github.com/tiann/KernelSU.git -b ${{ github.event.inputs.kernelsu_version }} --depth=1
+        else
+          git clone https://github.com/tiann/KernelSU.git --depth=1
+        fi
+        cd KernelSU
+        echo "KernelSU版本: $(git describe --tags --always)"
+
+    - name: 集成KernelSU到内核
+      run: |
+        cd kernel
+        ln -sf ../KernelSU/kernel drivers/kernelsu
+        echo 'obj-y += kernelsu/' >> drivers/Makefile
+        echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+        ls -la drivers/kernelsu/
+
+    - name: 配置内核
+      run: |
+        cd kernel
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        make camellia_defconfig
+        cat >> .config << EOF
+        CONFIG_KPROBES=y
+        CONFIG_HAVE_KPROBES=y
+        CONFIG_KPROBE_EVENTS=y
+        CONFIG_KSU=y
+        EOF
+        make olddefconfig
+        grep -E "CONFIG_KSU|CONFIG_KPROBES" .config
+
+    - name: 编译内核
+      run: |
+        cd kernel
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export USE_CCACHE=1
+        export CCACHE_DIR=~/.ccache
+        make -j$(nproc) Image.gz-dtb
+        ls -lh arch/arm64/boot/Image.gz-dtb
+
+    - name: 准备打包工具
+      run: |
+        wget https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk-v26.4.apk
+        unzip -j Magisk-*.apk 'lib/x86_64/libmagiskboot.so' -d .
+        mv libmagiskboot.so magiskboot
+        chmod +x magiskboot
+
+        cat > pack_boot.sh << 'EOF'
+        #!/bin/bash
+        echo "使用方法："
+        echo "1. 提取原始boot: adb shell su -c 'dd if=/dev/block/by-name/boot of=/sdcard/boot.img'"
+        echo "2. 解包: ./magiskboot unpack boot.img"
+        echo "3. 替换: cp Image.gz-dtb kernel"
+        echo "4. 打包: ./magiskboot repack boot.img"
+        echo "5. 刷入: fastboot flash boot new-boot.img"
+        EOF
+        chmod +x pack_boot.sh
+
+    - name: 收集编译信息
+      run: |
+        cat > build_info.txt << EOF
+        编译时间: $(date '+%Y-%m-%d %H:%M:%S')
+        设备: 红米Note 10 (camellia)
+        KernelSU: $(cd KernelSU && git describe --tags --always)
+        内核大小: $(ls -lh kernel/arch/arm64/boot/Image.gz-dtb | awk '{print $5}')
+        EOF
+
+    - name: 上传编译产物
+      uses: actions/upload-artifact@v3
+      with:
+        name: kernelsu-camellia
+        path: |
+          kernel/arch/arm64/boot/Image.gz-dtb
+          magiskboot
+          pack_boot.sh
+          build_info.txt
