@@ -65,15 +65,53 @@ jobs:
         fi
         cd KernelSU
         echo "KernelSU版本: $(git describe --tags --always)"
+        cd ..
+        echo "KernelSU目录内容:"
+        ls -la KernelSU/kernel/
 
     - name: 集成KernelSU到内核
       run: |
         cd kernel
-        ln -sf ../KernelSU/kernel drivers/kernelsu
-        echo 'obj-y += kernelsu/' >> drivers/Makefile
-        echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+
+        # 使用绝对路径创建符号链接
+        KERNELSU_PATH="$(pwd)/../KernelSU/kernel"
+        echo "KernelSU路径: $KERNELSU_PATH"
+
+        # 创建符号链接
+        ln -sf "$KERNELSU_PATH" drivers/kernelsu
+
+        # 验证链接是否创建成功
+        if [ -e "drivers/kernelsu" ]; then
+          echo "KernelSU链接创建成功"
+          ls -la drivers/kernelsu/
+        else
+          echo "符号链接失败，尝试直接复制"
+          cp -r ../KernelSU/kernel drivers/kernelsu
+          if [ -d "drivers/kernelsu" ]; then
+            echo "直接复制成功"
+          else
+            echo "错误：无法创建kernelsu目录"
+            exit 1
+          fi
+        fi
+
+        # 修改Makefile
+        if ! grep -q "kernelsu" drivers/Makefile; then
+          echo 'obj-y += kernelsu/' >> drivers/Makefile
+          echo "已添加kernelsu到Makefile"
+        else
+          echo "Makefile已包含kernelsu"
+        fi
+
+        # 修改Kconfig
+        if ! grep -q "kernelsu" drivers/Kconfig; then
+          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          echo "已添加kernelsu到Kconfig"
+        else
+          echo "Kconfig已包含kernelsu"
+        fi
+
         echo "KernelSU集成完成"
-        ls -la drivers/kernelsu/
 
     - name: 配置内核
       run: |
@@ -82,8 +120,10 @@ jobs:
         export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
 
+        # 使用默认配置
         make camellia_defconfig
 
+        # 添加KernelSU配置
         cat >> .config << EOF
         CONFIG_KPROBES=y
         CONFIG_HAVE_KPROBES=y
@@ -91,10 +131,11 @@ jobs:
         CONFIG_KSU=y
         EOF
 
+        # 更新配置
         make olddefconfig
 
         echo "检查KernelSU配置:"
-        grep -E "CONFIG_KSU|CONFIG_KPROBES" .config
+        grep -E "CONFIG_KSU|CONFIG_KPROBES" .config || echo "警告：KernelSU配置可能未启用"
 
     - name: 编译内核
       run: |
@@ -121,7 +162,7 @@ jobs:
         rm Magisk-*.apk
 
         # 创建打包脚本
-        cat > pack_boot.sh << 'EOF'
+        cat > pack_boot.sh << 'SCRIPT_END'
         #!/bin/bash
         echo "===== Boot.img打包说明 ====="
         echo ""
@@ -144,12 +185,12 @@ jobs:
         echo "   adb reboot bootloader"
         echo "   fastboot flash boot new-boot.img"
         echo "   fastboot reboot"
-        EOF
+        SCRIPT_END
         chmod +x pack_boot.sh
 
     - name: 收集编译信息
       run: |
-        cat > build_info.txt << EOF
+        cat > build_info.txt << 'INFO_END'
         ===== KernelSU内核编译信息 =====
 
         编译时间: $(date '+%Y-%m-%d %H:%M:%S')
@@ -171,7 +212,11 @@ jobs:
         4. 刷入手机测试
 
         注意：请先备份原始boot.img！
-        EOF
+        INFO_END
+
+        # 执行变量替换
+        eval "echo \"$(cat build_info.txt)\"" > build_info_final.txt
+        mv build_info_final.txt build_info.txt
 
     - name: 上传编译产物
       uses: actions/upload-artifact@v4
