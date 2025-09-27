@@ -1,7 +1,7 @@
 name: Build Camellia KernelSU Kernel
 
 on:
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
     inputs:
       kernelsu_version:
         description: 'KernelSU版本标签（留空使用最新）'
@@ -28,13 +28,23 @@ jobs:
     - name: 安装编译依赖
       run: |
         sudo apt update
+
+        # 安装基础编译工具
         sudo apt install -y \
-          bc bison build-essential ccache curl flex g++-multilib \
-           gcc-multilib git gnupg gperf liblz4-tool \
-           libncurses-dev libsdl1.2-dev libssl-dev \
-           libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
-           xsltproc zip zlib1g-dev python3 python3-pip device-tree-compiler \
-           gcc-aarch64-linux-gnu wget
+          bc bison build-essential ccache curl flex \
+          git gnupg gperf liblz4-tool \
+          libncurses-dev libsdl1.2-dev libssl-dev \
+          libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
+          xsltproc zip zlib1g-dev python3 python3-pip device-tree-compiler wget
+
+        # 尝试安装交叉编译器（兼容多个版本）
+        sudo apt install -y gcc-aarch64-linux-gnu || \
+        sudo apt install -y gcc-12-aarch64-linux-gnu || \
+        sudo apt install -y gcc-11-aarch64-linux-gnu || \
+        sudo apt install -y gcc-10-aarch64-linux-gnu
+
+        # 确认安装的GCC版本
+        aarch64-linux-gnu-gcc --version || echo "使用默认版本"
 
     - name: 设置ccache
       uses: hendrikmuhs/ccache-action@v1.2
@@ -44,6 +54,7 @@ jobs:
     - name: 克隆内核源码
       run: |
         git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b camellia-r-oss kernel --depth=1
+        echo "内核源码克隆完成"
 
     - name: 克隆KernelSU
       run: |
@@ -61,6 +72,7 @@ jobs:
         ln -sf ../KernelSU/kernel drivers/kernelsu
         echo 'obj-y += kernelsu/' >> drivers/Makefile
         echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+        echo "KernelSU集成完成"
         ls -la drivers/kernelsu/
 
     - name: 配置内核
@@ -69,14 +81,19 @@ jobs:
         export ARCH=arm64
         export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
+
         make camellia_defconfig
+
         cat >> .config << EOF
         CONFIG_KPROBES=y
         CONFIG_HAVE_KPROBES=y
         CONFIG_KPROBE_EVENTS=y
         CONFIG_KSU=y
         EOF
+
         make olddefconfig
+
+        echo "检查KernelSU配置:"
         grep -E "CONFIG_KSU|CONFIG_KPROBES" .config
 
     - name: 编译内核
@@ -87,34 +104,73 @@ jobs:
         export CROSS_COMPILE=aarch64-linux-gnu-
         export USE_CCACHE=1
         export CCACHE_DIR=~/.ccache
+
+        echo "开始编译内核..."
         make -j$(nproc) Image.gz-dtb
+
+        echo "编译完成，检查输出文件:"
         ls -lh arch/arm64/boot/Image.gz-dtb
 
     - name: 准备打包工具
       run: |
-        wget https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk-v26.4.apk
+        # 下载magiskboot
+        wget -q https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk-26.4.apk
         unzip -j Magisk-*.apk 'lib/x86_64/libmagiskboot.so' -d .
         mv libmagiskboot.so magiskboot
         chmod +x magiskboot
+        rm Magisk-*.apk
 
+        # 创建打包脚本
         cat > pack_boot.sh << 'EOF'
         #!/bin/bash
+        echo "===== Boot.img打包说明 ====="
+        echo ""
         echo "使用方法："
-        echo "1. 提取原始boot: adb shell su -c 'dd if=/dev/block/by-name/boot of=/sdcard/boot.img'"
-        echo "2. 解包: ./magiskboot unpack boot.img"
-        echo "3. 替换: cp Image.gz-dtb kernel"
-        echo "4. 打包: ./magiskboot repack boot.img"
-        echo "5. 刷入: fastboot flash boot new-boot.img"
+        echo "1. 从手机提取原始boot.img:"
+        echo "   adb shell su -c 'dd if=/dev/block/by-name/boot of=/sdcard/boot.img'"
+        echo "   adb pull /sdcard/boot.img"
+        echo ""
+        echo "2. 解包原始boot.img:"
+        echo "   ./magiskboot unpack boot.img"
+        echo ""
+        echo "3. 替换内核:"
+        echo "   cp Image.gz-dtb kernel"
+        echo ""
+        echo "4. 重新打包:"
+        echo "   ./magiskboot repack boot.img"
+        echo "   (生成new-boot.img)"
+        echo ""
+        echo "5. 刷入新内核:"
+        echo "   adb reboot bootloader"
+        echo "   fastboot flash boot new-boot.img"
+        echo "   fastboot reboot"
         EOF
         chmod +x pack_boot.sh
 
     - name: 收集编译信息
       run: |
         cat > build_info.txt << EOF
+        ===== KernelSU内核编译信息 =====
+
         编译时间: $(date '+%Y-%m-%d %H:%M:%S')
         设备: 红米Note 10 (camellia)
-        KernelSU: $(cd KernelSU && git describe --tags --always)
-        内核大小: $(ls -lh kernel/arch/arm64/boot/Image.gz-dtb | awk '{print $5}')
+        处理器: MediaTek Dimensity 700
+        Android版本: 11 (R)
+
+        KernelSU版本: $(cd KernelSU && git describe --tags --always)
+        内核文件: Image.gz-dtb
+        文件大小: $(ls -lh kernel/arch/arm64/boot/Image.gz-dtb | awk '{print $5}')
+
+        GCC版本:
+        $(aarch64-linux-gnu-gcc --version | head -n1)
+
+        使用说明:
+        1. 下载本压缩包
+        2. 解压获得Image.gz-dtb和工具
+        3. 按照pack_boot.sh中的说明打包boot.img
+        4. 刷入手机测试
+
+        注意：请先备份原始boot.img！
         EOF
 
     - name: 上传编译产物
@@ -126,3 +182,25 @@ jobs:
           magiskboot
           pack_boot.sh
           build_info.txt
+
+    - name: 显示编译摘要
+      run: |
+        echo "## 🎉 编译成功！" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📱 设备信息" >> $GITHUB_STEP_SUMMARY
+        echo "- 设备: 红米Note 10 (camellia)" >> $GITHUB_STEP_SUMMARY
+        echo "- 处理器: MediaTek Dimensity 700" >> $GITHUB_STEP_SUMMARY
+        echo "- Android版本: 11 (R)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 编译产物" >> $GITHUB_STEP_SUMMARY
+        echo "- 内核文件: Image.gz-dtb" >> $GITHUB_STEP_SUMMARY
+        echo "- 文件大小: $(ls -lh kernel/arch/arm64/boot/Image.gz-dtb | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+        echo "- KernelSU: ✅ 已集成" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📥 下载" >> $GITHUB_STEP_SUMMARY
+        echo "请在Actions页面下载 **kernelsu-camellia.zip**" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### ⚠️ 注意事项" >> $GITHUB_STEP_SUMMARY
+        echo "1. 刷入前请备份原始boot.img" >> $GITHUB_STEP_SUMMARY
+        echo "2. 需要解锁Bootloader" >> $GITHUB_STEP_SUMMARY
+        echo "3. 首次刷入可能需要清除数据" >> $GITHUB_STEP_SUMMARY
