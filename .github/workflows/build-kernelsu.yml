@@ -14,18 +14,29 @@ jobs:
     timeout-minutes: 60
 
     steps:
-    - name: 最大化构建空间
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 512
-        swap-size-mb: 1024
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-docker-images: 'true'
-
     - name: 检出仓库
       uses: actions/checkout@v4
+
+    - name: 清理磁盘空间
+      run: |
+        echo "===== 清理前磁盘使用 ====="
+        df -h
+
+        echo "清理不需要的软件..."
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+
+        echo "清理APT缓存..."
+        sudo apt-get clean
+        sudo apt-get autoremove -y
+
+        echo "===== 清理后磁盘使用 ====="
+        df -h
+        echo "可用空间: $(df -h / | awk 'NR==2 {print $4}')"
 
     - name: 安装编译依赖
       run: |
@@ -51,20 +62,14 @@ jobs:
         cd $HOME
         echo "开始下载内核源码压缩包..."
 
-        # 直接下载ZIP压缩包（比git clone快很多）
+        # 直接下载ZIP压缩包
         wget -q --show-progress --timeout=300 \
           https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip \
           -O kernel.zip || {
             echo "GitHub下载失败，尝试加速链接..."
-            # 使用GitHub加速服务
             wget -q --show-progress --timeout=300 \
               https://ghproxy.com/https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip \
-              -O kernel.zip || {
-                echo "使用镜像下载..."
-                wget -q --show-progress --timeout=300 \
-                  https://mirror.ghproxy.com/https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip \
-                  -O kernel.zip
-              }
+              -O kernel.zip
           }
 
         echo "解压内核源码..."
@@ -266,7 +271,7 @@ jobs:
 
         【文件说明】
         - Image.gz-dtb    : KernelSU内核文件
-        - magiskboot      : Boot镜像处理工具
+        - magiskboot      : Boot镜像处理工具（不是Magisk！）
         - make_boot.sh    : Linux/Mac制作脚本
         - make_boot.bat   : Windows制作脚本
 
@@ -291,9 +296,9 @@ jobs:
            https://github.com/tiann/KernelSU/releases
 
         【注意事项】
+        ⚠️ 这是KernelSU内核，会替代Magisk/Kitsune Mask
         ⚠️ 刷入前必须备份原版boot.img
         ⚠️ 需要解锁Bootloader
-        ⚠️ KernelSU将替代原有的Magisk/Kitsune Mask
         ⚠️ 首次刷入建议清除数据
 
         【救砖方法】
@@ -329,5 +334,6 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "## ⚠️ 重要提醒" >> $GITHUB_STEP_SUMMARY
         echo "- 这是KernelSU内核，不是Magisk" >> $GITHUB_STEP_SUMMARY
+        echo "- 会替代原有的Kitsune Mask" >> $GITHUB_STEP_SUMMARY
         echo "- 刷入前务必备份原版boot.img" >> $GITHUB_STEP_SUMMARY
         echo "- 需要安装KernelSU管理器APP" >> $GITHUB_STEP_SUMMARY
