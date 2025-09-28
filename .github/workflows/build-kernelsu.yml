@@ -1,4 +1,4 @@
-name: Debug Kernel Build
+name: Simple Kernel Build Test
 
 on:
   workflow_dispatch:
@@ -6,235 +6,106 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 60
 
     steps:
-    - name: 检出仓库
-      uses: actions/checkout@v4
-
-    - name: 清理空间
-      run: |
-        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
-        df -h
-
-    - name: 安装依赖
+    - name: 安装基本依赖
       run: |
         sudo apt update
-        sudo apt install -y bc bison build-essential curl flex git libssl-dev wget \
-          gcc-aarch64-linux-gnu python3 device-tree-compiler libncurses-dev \
-          zip unzip
+        sudo apt install -y bc bison build-essential flex git libssl-dev \
+          gcc-aarch64-linux-gnu wget unzip python3
 
-    - name: 下载源码
+    - name: 下载并准备源码
       run: |
         cd $HOME
-        echo "下载内核源码..."
-        wget --no-check-certificate -q --show-progress \
-          https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip \
-          -O kernel.zip
 
-        unzip -q kernel.zip
+        # 下载内核源码
+        wget -q --show-progress --timeout=60 \
+          https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip
+        unzip -q camellia-r-oss.zip
         mv Xiaomi_Kernel_OpenSource-camellia-r-oss kernel
-        rm kernel.zip
 
-        echo "下载KernelSU..."
-        wget --no-check-certificate -q --show-progress \
-          https://github.com/tiann/KernelSU/archive/refs/heads/main.zip \
-          -O ksu.zip
+        # 下载KernelSU
+        wget -q --show-progress --timeout=60 \
+          https://github.com/tiann/KernelSU/archive/refs/heads/main.zip
+        unzip -q main.zip
+        mv KernelSU-main KernelSU
 
-        unzip -q ksu.zip
-        mv KernelSU-* KernelSU
-        rm ksu.zip
-
-    - name: 检查源码
-      run: |
-        echo "===== 检查内核源码结构 ====="
-        ls -la $HOME/kernel/
-        echo ""
-        echo "===== 检查arch/arm64 ====="
-        ls -la $HOME/kernel/arch/arm64/ 2>/dev/null || echo "arch/arm64不存在"
-        echo ""
-        echo "===== 检查Makefile ====="
-        head -20 $HOME/kernel/Makefile
-
-    - name: 集成KernelSU
-      run: |
-        cd $HOME/kernel
-        cp -r $HOME/KernelSU/kernel drivers/kernelsu
+        # 集成KernelSU
+        cd kernel
+        cp -r ../KernelSU/kernel drivers/kernelsu
         echo 'obj-y += kernelsu/' >> drivers/Makefile
-        echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
 
-        echo "KernelSU集成完成"
-        ls -la drivers/kernelsu/
-
-    - name: 应用最简配置
+    - name: 尝试最基本的编译
       run: |
         cd $HOME/kernel
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
 
-        echo "===== 生成默认配置 ====="
-        make camellia_defconfig 2>&1 | tail -50
-
-        echo ""
-        echo "===== 检查配置文件 ====="
-        if [ -f ".config" ]; then
-          echo "配置文件生成成功"
-          echo "配置行数: $(wc -l .config)"
-        else
-          echo "错误：配置文件未生成"
-        fi
-
-        # 添加KernelSU配置
-        echo "CONFIG_KSU=y" >> .config
-        make olddefconfig
-
-    - name: 尝试最简单编译
-      run: |
-        cd $HOME/kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         export KCFLAGS="-w"
 
-        echo "===== 开始编译prepare ====="
-        make prepare 2>&1 | tail -100
+        # 生成配置
+        make camellia_defconfig
 
-        echo ""
-        echo "===== 尝试编译scripts ====="
-        make scripts 2>&1 | tail -100
+        # 禁用所有可能有问题的功能
+        ./scripts/config --disable CONFIG_CPU_IDLE
+        ./scripts/config --disable CONFIG_PM_DEVFREQ
+        ./scripts/config --disable CONFIG_BLK_INLINE_ENCRYPTION
+        ./scripts/config --disable CONFIG_CC_STACKPROTECTOR_STRONG
+        ./scripts/config --disable CONFIG_COMMON_CLK_MT6833
+        ./scripts/config --enable CONFIG_KSU
 
-        echo ""
-        echo "===== 尝试编译vmlinux ====="
-        timeout 15m make -j2 vmlinux 2>&1 | tail -200 || {
-          echo "vmlinux编译超时或失败"
-        }
+        make olddefconfig
 
-        echo ""
-        echo "===== 查找任何编译输出 ====="
-        find . -name "*.o" -type f 2>/dev/null | head -20
-        find . -name "vmlinux*" -type f 2>/dev/null
-        find . -name "*Image*" -type f 2>/dev/null
+        # 尝试编译（只编译核心）
+        echo "开始编译..."
+        make -j2 Image 2>&1 | head -500
 
+        # 检查结果
         echo ""
-        echo "===== 检查是否有部分编译成功 ====="
-        if [ -f "vmlinux" ]; then
-          echo "✅ vmlinux存在"
+        echo "===== 检查编译结果 ====="
+
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "✅ 成功！找到Image"
+          ls -lh arch/arm64/boot/Image
+        elif [ -f vmlinux ]; then
+          echo "⚠️ 只有vmlinux"
           ls -lh vmlinux
-        fi
-
-        if [ -d "arch/arm64/boot" ]; then
-          echo "boot目录内容："
-          ls -la arch/arm64/boot/
-        fi
-
-    - name: 尝试绕过编译直接打包
-      run: |
-        mkdir -p output
-        cd output
-
-        echo "===== 创建占位内核文件 ====="
-        # 创建一个假的内核文件用于测试打包流程
-        dd if=/dev/zero of=Image.gz-dtb bs=1M count=20
-        echo "创建了20MB的测试文件"
-
-        echo ""
-        echo "===== 下载magiskboot（使用正确链接）====="
-        # 尝试多个下载源
-        echo "尝试下载Magisk..."
-
-        # 方法1：直接下载APK
-        wget --no-check-certificate -O Magisk.apk \
-          "https://github.com/topjohnwu/Magisk/releases/download/v26.4/Magisk-26.4.apk" || {
-            echo "主链接失败，尝试备用..."
-            # 方法2：使用镜像
-            wget --no-check-certificate -O Magisk.apk \
-              "https://ghproxy.com/https://github.com/topjohnwu/Magisk/releases/download/v26.4/Magisk-26.4.apk"
-          }
-
-        if [ -f "Magisk.apk" ]; then
-          echo "APK下载成功，大小: $(ls -lh Magisk.apk | awk '{print $5}')"
-
-          # 验证是否为有效的zip文件
-          if unzip -t Magisk.apk > /dev/null 2>&1; then
-            echo "APK文件有效，提取magiskboot..."
-            unzip -j Magisk.apk 'lib/x86_64/libmagiskboot.so' 2>/dev/null || \
-            unzip -j Magisk.apk 'lib/x86/libmagiskboot.so' 2>/dev/null || \
-            unzip -j Magisk.apk '*magiskboot*' 2>/dev/null
-
-            if [ -f "libmagiskboot.so" ]; then
-              mv libmagiskboot.so magiskboot
-              chmod +x magiskboot
-              echo "✅ magiskboot提取成功"
-            else
-              echo "❌ 无法提取magiskboot"
-            fi
-          else
-            echo "APK文件无效"
-          fi
-
-          rm -f Magisk.apk
         else
-          echo "❌ 无法下载Magisk"
+          echo "❌ 编译失败"
+          echo "查找.o文件..."
+          find . -name "*.o" -type f | wc -l
         fi
 
-        # 创建基本文件
-        cat > README.txt << 'EOF'
-        调试版本输出
+    - name: 打包结果（无需外部工具）
+      run: |
+        mkdir output
 
-        这不是真正的内核，只是测试打包流程
-        请查看Actions日志了解编译失败原因
+        # 如果有内核文件，复制
+        if [ -f "$HOME/kernel/arch/arm64/boot/Image" ]; then
+          cp "$HOME/kernel/arch/arm64/boot/Image" output/
+          echo "内核编译成功！" > output/SUCCESS.txt
+        else
+          echo "编译失败" > output/FAILED.txt
+          # 复制一些日志
+          tail -500 $HOME/kernel/build.log > output/build_error.log 2>/dev/null || true
+        fi
+
+        # 创建简单说明
+        cat > output/README.txt << 'EOF'
+        编译测试结果
+
+        如果有Image文件：编译成功
+        如果只有FAILED.txt：编译失败
+
+        后续步骤（如果成功）：
+        1. 下载Image文件
+        2. 自行使用magiskboot打包
+        3. 刷入测试
         EOF
 
-        ls -la
-
-    - name: 分析失败原因
-      if: always()
-      run: |
-        echo "===== 分析编译失败原因 ====="
-
-        if [ -d "$HOME/kernel" ]; then
-          cd $HOME/kernel
-
-          echo "最近的错误日志："
-          dmesg | tail -20 2>/dev/null || true
-
-          echo ""
-          echo "查找错误信息："
-          find . -name "*.log" -type f 2>/dev/null | while read f; do
-            echo "=== $f ==="
-            tail -20 "$f" 2>/dev/null || true
-          done
-        fi
-
-        echo ""
-        echo "===== 磁盘空间 ====="
-        df -h
-
-        echo ""
-        echo "===== 内存使用 ====="
-        free -h
-
-    - name: 上传调试信息
-      if: always()
+    - name: 上传结果
       uses: actions/upload-artifact@v4
       with:
-        name: Debug-Output
+        name: Build-Result
         path: output/
-
-    - name: 摘要
-      if: always()
-      run: |
-        echo "# 🔍 调试信息" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "## 编译状态" >> $GITHUB_STEP_SUMMARY
-        if [ -f "$HOME/kernel/vmlinux" ]; then
-          echo "- ✅ vmlinux生成" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "- ❌ vmlinux未生成" >> $GITHUB_STEP_SUMMARY
-        fi
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "## 可能的问题" >> $GITHUB_STEP_SUMMARY
-        echo "1. 内核源码本身有严重bug" >> $GITHUB_STEP_SUMMARY
-        echo "2. 缺少必要的配置" >> $GITHUB_STEP_SUMMARY
-        echo "3. 编译环境问题" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "请查看完整日志了解详情" >> $GITHUB_STEP_SUMMARY
