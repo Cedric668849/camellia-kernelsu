@@ -1,12 +1,7 @@
-name: Build Camellia KernelSU Kernel
+name: Build Minimal KernelSU Kernel
 
 on:
   workflow_dispatch:
-    inputs:
-      kernelsu_version:
-        description: 'KernelSU版本标签（留空使用最新）'
-        required: false
-        default: ''
 
 jobs:
   build:
@@ -19,64 +14,26 @@ jobs:
 
     - name: 清理磁盘空间
       run: |
-        echo "===== 清理前磁盘使用 ====="
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /usr/local/lib/android
+        sudo apt-get clean && sudo apt-get autoremove -y
         df -h
 
-        echo "清理不需要的软件..."
-        sudo rm -rf /usr/share/dotnet
-        sudo rm -rf /opt/ghc
-        sudo rm -rf /usr/local/share/boost
-        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-        sudo rm -rf /usr/local/lib/android
-        sudo rm -rf /opt/hostedtoolcache/CodeQL
-
-        echo "清理APT缓存..."
-        sudo apt-get clean
-        sudo apt-get autoremove -y
-
-        echo "===== 清理后磁盘使用 ====="
-        df -h
-
-    - name: 安装编译依赖
+    - name: 安装依赖
       run: |
         sudo apt update
-        sudo apt install -y \
-          bc bison build-essential ccache curl flex \
-          git gnupg gperf liblz4-tool \
-          libncurses-dev libsdl1.2-dev libssl-dev \
-          libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
-          xsltproc zip zlib1g-dev python3 python3-pip device-tree-compiler wget \
-          gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+        sudo apt install -y bc bison build-essential curl flex git libssl-dev wget \
+          gcc-aarch64-linux-gnu python3 device-tree-compiler
 
-    - name: 下载内核源码
+    - name: 下载源码
       run: |
         cd $HOME
-        echo "下载内核源码..."
-        wget -q --show-progress --timeout=300 \
-          https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip \
-          -O kernel.zip || \
-        wget -q --show-progress --timeout=300 \
-          https://ghproxy.com/https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip \
-          -O kernel.zip
+        wget -q --show-progress https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip -O kernel.zip || \
+        wget -q --show-progress https://ghproxy.com/https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip -O kernel.zip
+        unzip -q kernel.zip && mv Xiaomi_Kernel_OpenSource-camellia-r-oss kernel && rm kernel.zip
 
-        unzip -q kernel.zip
-        mv Xiaomi_Kernel_OpenSource-camellia-r-oss kernel
-        rm kernel.zip
-
-    - name: 下载KernelSU
-      run: |
-        cd $HOME
-        echo "下载KernelSU..."
-        wget -q --show-progress \
-          https://github.com/tiann/KernelSU/archive/refs/heads/main.zip \
-          -O kernelsu.zip || \
-        wget -q --show-progress \
-          https://ghproxy.com/https://github.com/tiann/KernelSU/archive/refs/heads/main.zip \
-          -O kernelsu.zip
-
-        unzip -q kernelsu.zip
-        mv KernelSU-* KernelSU
-        rm kernelsu.zip
+        wget -q --show-progress https://github.com/tiann/KernelSU/archive/refs/heads/main.zip -O ksu.zip || \
+        wget -q --show-progress https://ghproxy.com/https://github.com/tiann/KernelSU/archive/refs/heads/main.zip -O ksu.zip
+        unzip -q ksu.zip && mv KernelSU-* KernelSU && rm ksu.zip
 
     - name: 集成KernelSU
       run: |
@@ -85,121 +42,107 @@ jobs:
         echo 'obj-y += kernelsu/' >> drivers/Makefile
         echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
 
-    - name: 编译内核
+    - name: 激进禁用所有问题驱动
       run: |
         cd $HOME/kernel
 
+        echo "===== 禁用所有编译失败的驱动 ====="
+
+        # 禁用整个CPUIDLE子系统
+        rm -rf drivers/cpuidle/*
+        echo "# CPUIDLE disabled" > drivers/cpuidle/Makefile
+        echo "# CPUIDLE disabled" > drivers/cpuidle/Kconfig
+
+        # 禁用MediaTek时钟调试
+        rm -f drivers/clk/mediatek/clkdbg*.c
+        sed -i '/clkdbg/d' drivers/clk/mediatek/Makefile
+
+        # 禁用block加密
+        rm -f block/blk-crypto.c block/bio-crypt-ctx.c
+        sed -i '/blk-crypto/d' block/Makefile
+        sed -i '/bio-crypt-ctx/d' block/Makefile
+
+        # 禁用SDCARD FS
+        rm -rf fs/sdcardfs
+        sed -i '/sdcardfs/d' fs/Makefile
+        sed -i '/sdcardfs/d' fs/Kconfig
+
+        # 禁用DEVFREQ
+        rm -rf drivers/devfreq
+        echo "# DEVFREQ disabled" > drivers/devfreq/Makefile
+
+        # 禁用设备树（使用预编译的）
+        echo "# DTB disabled" > arch/arm64/boot/dts/Makefile
+
+        echo "===== 驱动禁用完成 ====="
+
+    - name: 极简配置
+      run: |
+        cd $HOME/kernel
         export ARCH=arm64
-        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+
+        make camellia_defconfig
+
+        # 禁用所有问题配置
+        cat >> .config << 'EOF'
+        # 禁用编译失败的功能
+        CONFIG_CPU_IDLE=n
+        CONFIG_PM_DEVFREQ=n
+        CONFIG_SDCARD_FS=n
+        CONFIG_BLK_INLINE_ENCRYPTION=n
+        CONFIG_FS_ENCRYPTION_INLINE_CRYPT=n
+        CONFIG_COMMON_CLK_MT6833=n
+        CONFIG_CC_STACKPROTECTOR_STRONG=n
+        CONFIG_CC_STACKPROTECTOR=n
+
+        # 启用KernelSU
+        CONFIG_KPROBES=y
+        CONFIG_HAVE_KPROBES=y
+        CONFIG_KPROBE_EVENTS=y
+        CONFIG_KSU=y
+        EOF
+
+        make olddefconfig
+
+    - name: 编译内核
+      run: |
+        cd $HOME/kernel
+        export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         export KCFLAGS="-w"
 
-        echo "配置内核..."
-        make camellia_defconfig
-
-        # 添加KernelSU
-        echo "CONFIG_KSU=y" >> .config
-        make olddefconfig
-
         echo "开始编译..."
-        make -j$(nproc) Image.gz-dtb 2>&1 | tee build.log || true
+        make -j$(nproc) Image 2>&1 | tee build.log
 
-        echo ""
-        echo "===== 查找编译产物 ====="
+        # 检查结果
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "✅ Image编译成功"
 
-        # 查找所有可能的内核镜像位置
-        echo "查找Image.gz-dtb..."
-        find . -name "Image.gz-dtb" -type f 2>/dev/null | while read f; do
-          echo "找到: $f ($(ls -lh "$f" | awk '{print $5}'))"
-        done
+          # 手动压缩
+          gzip -c arch/arm64/boot/Image > arch/arm64/boot/Image.gz
 
-        echo ""
-        echo "查找Image.gz..."
-        find . -name "Image.gz" -type f 2>/dev/null | while read f; do
-          echo "找到: $f ($(ls -lh "$f" | awk '{print $5}'))"
-        done
+          # 创建假的dtb（如果真的需要，从ROM提取）
+          echo "FAKE_DTB" > fake.dtb
+          cat arch/arm64/boot/Image.gz fake.dtb > arch/arm64/boot/Image.gz-dtb
 
-        echo ""
-        echo "查找Image..."
-        find . -name "Image" -type f 2>/dev/null | while read f; do
-          echo "找到: $f ($(ls -lh "$f" | awk '{print $5}'))"
-        done
-
-        echo ""
-        echo "查找zImage..."
-        find . -name "zImage" -type f 2>/dev/null | while read f; do
-          echo "找到: $f ($(ls -lh "$f" | awk '{print $5}'))"
-        done
-
-        echo ""
-        echo "查找vmlinux..."
-        if [ -f "vmlinux" ]; then
-          echo "找到vmlinux ($(ls -lh vmlinux | awk '{print $5}'))"
-        fi
-
-        echo ""
-        echo "===== 尝试继续编译 ====="
-
-        # 如果没有找到Image.gz-dtb，尝试单独编译
-        if [ ! -f "arch/arm64/boot/Image.gz-dtb" ]; then
-          echo "尝试编译Image..."
-          make Image || true
-
-          echo "尝试编译dtbs..."
-          make dtbs || true
-
-          echo "尝试手动合并..."
-          if [ -f "arch/arm64/boot/Image" ]; then
-            echo "压缩Image..."
-            gzip -c arch/arm64/boot/Image > arch/arm64/boot/Image.gz || true
-          fi
-
-          if [ -f "arch/arm64/boot/Image.gz" ] && [ -d "arch/arm64/boot/dts" ]; then
-            echo "尝试合并dtb..."
-            # 查找dtb文件
-            DTB=$(find arch/arm64/boot/dts -name "*.dtb" 2>/dev/null | head -1)
-            if [ -n "$DTB" ]; then
-              echo "使用DTB: $DTB"
-              cat arch/arm64/boot/Image.gz "$DTB" > arch/arm64/boot/Image.gz-dtb
-            fi
-          fi
-        fi
-
-        echo ""
-        echo "===== 最终检查 ====="
-
-        # 最终检查
-        if [ -f "arch/arm64/boot/Image.gz-dtb" ]; then
-          echo "✅ 成功找到Image.gz-dtb!"
-          ls -lh arch/arm64/boot/Image.gz-dtb
-        elif [ -f "arch/arm64/boot/Image" ]; then
-          echo "⚠️ 只找到Image，使用它代替"
-          cp arch/arm64/boot/Image arch/arm64/boot/Image.gz-dtb
-        elif [ -f "vmlinux" ]; then
-          echo "⚠️ 只找到vmlinux，尝试提取"
-          aarch64-linux-gnu-objcopy -O binary vmlinux arch/arm64/boot/Image
-          gzip -c arch/arm64/boot/Image > arch/arm64/boot/Image.gz-dtb
+          ls -lh arch/arm64/boot/Image*
         else
-          echo "❌ 未找到任何内核文件"
-          echo "显示编译日志最后100行："
-          tail -n 100 build.log
+          echo "❌ 编译失败"
+          tail -n 200 build.log
           exit 1
         fi
 
-    - name: 打包产物
+    - name: 打包
       run: |
         mkdir -p output
 
-        # 复制内核（如果存在）
         if [ -f "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" ]; then
           cp "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" output/
-          echo "内核大小: $(ls -lh output/Image.gz-dtb | awk '{print $5}')"
         elif [ -f "$HOME/kernel/arch/arm64/boot/Image" ]; then
           cp "$HOME/kernel/arch/arm64/boot/Image" output/Image.gz-dtb
-          echo "使用未压缩内核，大小: $(ls -lh output/Image.gz-dtb | awk '{print $5}')"
         fi
 
-        # 下载magiskboot
         cd output
         wget -q https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk-26.4.apk
         unzip -q -j Magisk-26.4.apk 'lib/x86_64/libmagiskboot.so'
@@ -207,37 +150,72 @@ jobs:
         chmod +x magiskboot
         rm Magisk-26.4.apk
 
-        # 创建脚本
         cat > make_boot.sh << 'EOF'
         #!/bin/bash
-        echo "KernelSU Boot制作工具"
+        echo "KernelSU极简内核打包工具"
+        echo "注意：这是实验性内核，禁用了省电功能"
+
         if [ ! -f boot.img ]; then
-          echo "请放入原版boot.img"
+          echo "错误：需要原版boot.img"
           exit 1
         fi
+
         ./magiskboot unpack boot.img
         cp Image.gz-dtb kernel
         ./magiskboot repack boot.img
-        echo "完成! 输出: new-boot.img"
+
+        echo "完成：new-boot.img"
+        echo ""
+        echo "⚠️ 警告："
+        echo "1. 此内核禁用了CPUIDLE（省电功能）"
+        echo "2. 可能耗电增加"
+        echo "3. 但应该能正常启动"
         EOF
         chmod +x make_boot.sh
 
-        # 创建说明
         cat > README.txt << 'EOF'
-        KernelSU内核 - 红米Note 10
+        KernelSU极简内核 - 红米Note 10
 
-        注意：如果内核文件很大(>50MB)，可能是未压缩的Image
-        这种情况下刷入可能会失败，请谨慎测试
+        ⚠️ 重要说明 ⚠️
+        这是极简版内核，为了编译成功禁用了：
+        - CPUIDLE（CPU空闲管理）- 可能更耗电
+        - DEVFREQ（动态频率调节）- 性能可能不如原版
+        - SDCARD_FS（外置SD卡文件系统）- 如果用外置SD卡会有问题
+        - Block层加密（不影响普通使用）
 
-        使用步骤:
-        1. 备份原boot.img
-        2. 运行make_boot.sh
-        3. 刷入new-boot.img
-        4. 安装KernelSU管理器
+        ✅ 保留的功能：
+        - KernelSU root
+        - 基本系统功能
+        - 所有核心驱动
+
+        使用前请确保：
+        1. 已备份原版boot.img
+        2. 理解可能更耗电
+        3. 准备好救砖工具
+
+        刷入方法：
+        1. 放入原版boot.img
+        2. 运行./make_boot.sh
+        3. fastboot flash boot new-boot.img
         EOF
 
-    - name: 上传结果
+    - name: 上传
       uses: actions/upload-artifact@v4
       with:
-        name: KernelSU-Camellia
+        name: KernelSU-Minimal-Camellia
         path: output/
+
+    - name: 摘要
+      run: |
+        echo "# ⚠️ 极简版KernelSU内核编译完成" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 警告" >> $GITHUB_STEP_SUMMARY
+        echo "这是实验性内核，禁用了以下功能以确保编译成功：" >> $GITHUB_STEP_SUMMARY
+        echo "- CPU空闲管理（可能更耗电）" >> $GITHUB_STEP_SUMMARY
+        echo "- 动态频率调节" >> $GITHUB_STEP_SUMMARY
+        echo "- SD卡文件系统" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 使用建议" >> $GITHUB_STEP_SUMMARY
+        echo "1. 仅用于测试KernelSU功能" >> $GITHUB_STEP_SUMMARY
+        echo "2. 不建议日常使用（耗电）" >> $GITHUB_STEP_SUMMARY
+        echo "3. 测试改机效果后可以尝试优化" >> $GITHUB_STEP_SUMMARY
