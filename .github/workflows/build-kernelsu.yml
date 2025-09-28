@@ -1,4 +1,4 @@
-name: Build Minimal KernelSU Kernel
+name: Debug Kernel Build
 
 on:
   workflow_dispatch:
@@ -12,28 +12,49 @@ jobs:
     - name: 检出仓库
       uses: actions/checkout@v4
 
-    - name: 清理磁盘空间
+    - name: 清理空间
       run: |
-        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /usr/local/lib/android
-        sudo apt-get clean && sudo apt-get autoremove -y
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
         df -h
 
     - name: 安装依赖
       run: |
         sudo apt update
         sudo apt install -y bc bison build-essential curl flex git libssl-dev wget \
-          gcc-aarch64-linux-gnu python3 device-tree-compiler libncurses-dev
+          gcc-aarch64-linux-gnu python3 device-tree-compiler libncurses-dev \
+          zip unzip
 
     - name: 下载源码
       run: |
         cd $HOME
-        wget -q --show-progress https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip -O kernel.zip || \
-        wget -q --show-progress https://ghproxy.com/https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip -O kernel.zip
-        unzip -q kernel.zip && mv Xiaomi_Kernel_OpenSource-camellia-r-oss kernel && rm kernel.zip
+        echo "下载内核源码..."
+        wget --no-check-certificate -q --show-progress \
+          https://github.com/MiCode/Xiaomi_Kernel_OpenSource/archive/refs/heads/camellia-r-oss.zip \
+          -O kernel.zip
 
-        wget -q --show-progress https://github.com/tiann/KernelSU/archive/refs/heads/main.zip -O ksu.zip || \
-        wget -q --show-progress https://ghproxy.com/https://github.com/tiann/KernelSU/archive/refs/heads/main.zip -O ksu.zip
-        unzip -q ksu.zip && mv KernelSU-* KernelSU && rm ksu.zip
+        unzip -q kernel.zip
+        mv Xiaomi_Kernel_OpenSource-camellia-r-oss kernel
+        rm kernel.zip
+
+        echo "下载KernelSU..."
+        wget --no-check-certificate -q --show-progress \
+          https://github.com/tiann/KernelSU/archive/refs/heads/main.zip \
+          -O ksu.zip
+
+        unzip -q ksu.zip
+        mv KernelSU-* KernelSU
+        rm ksu.zip
+
+    - name: 检查源码
+      run: |
+        echo "===== 检查内核源码结构 ====="
+        ls -la $HOME/kernel/
+        echo ""
+        echo "===== 检查arch/arm64 ====="
+        ls -la $HOME/kernel/arch/arm64/ 2>/dev/null || echo "arch/arm64不存在"
+        echo ""
+        echo "===== 检查Makefile ====="
+        head -20 $HOME/kernel/Makefile
 
     - name: 集成KernelSU
       run: |
@@ -42,255 +63,178 @@ jobs:
         echo 'obj-y += kernelsu/' >> drivers/Makefile
         echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
 
-    - name: 激进修复所有编译问题
-      run: |
-        cd $HOME/kernel
+        echo "KernelSU集成完成"
+        ls -la drivers/kernelsu/
 
-        echo "===== 开始激进修复 ====="
-
-        # 修复或禁用CPUIDLE
-        if [ -d "drivers/cpuidle" ]; then
-          echo "修复cpuidle头文件..."
-          find drivers/cpuidle -name "*.c" -exec sed -i 's/#include <dt_idle_states\.h>/#include "dt_idle_states.h"/g' {} \;
-          find drivers/cpuidle -name "*.c" -exec sed -i 's/#include <\([^>]*\)\.h"/#include <\1.h>/g' {} \;
-        fi
-
-        # 修复MediaTek时钟驱动
-        if [ -d "drivers/clk/mediatek" ]; then
-          echo "修复clk头文件..."
-          find drivers/clk/mediatek -name "*.c" -exec sed -i 's/#include <clk-mux\.h>/#include "clk-mux.h"/g' {} \;
-          # 如果还有问题就删除调试文件
-          rm -f drivers/clk/mediatek/clkdbg*.c 2>/dev/null || true
-          sed -i '/clkdbg/d' drivers/clk/mediatek/Makefile 2>/dev/null || true
-        fi
-
-        # 修复block加密（删除有问题的函数）
-        if [ -f "block/blk-crypto.c" ]; then
-          echo "修复block加密..."
-          # 注释掉有问题的函数调用
-          sed -i 's/ksm_flock(ksm, flags);/\/\/ ksm_flock(ksm, flags);/g' block/blk-crypto.c
-          sed -i 's/ksm_funlock(ksm, flags);/\/\/ ksm_funlock(ksm, flags);/g' block/blk-crypto.c
-        fi
-
-        # 修复SDCARD FS
-        if [ -d "fs/sdcardfs" ]; then
-          echo "修复sdcardfs头文件..."
-          find fs/sdcardfs -name "*.c" -exec sed -i 's/#include <\([^>]*\)\.h"/#include <\1.h>/g' {} \;
-        fi
-
-        # 修复DEVFREQ（如果存在）
-        if [ -d "drivers/devfreq" ]; then
-          echo "修复devfreq头文件..."
-          find drivers/devfreq -name "*.c" -exec sed -i 's/#include <helio-dvfsrc-qos\.h>/#include "helio-dvfsrc-qos.h"/g' {} \;
-        fi
-
-        # 创建缺失的头文件（如果需要）
-        echo "创建可能缺失的头文件..."
-        if [ ! -f "include/dt_idle_states.h" ] && [ -f "drivers/cpuidle/dt_idle_states.h" ]; then
-          cp drivers/cpuidle/dt_idle_states.h include/
-        fi
-
-        echo "===== 修复完成 ====="
-
-    - name: 最小化配置
+    - name: 应用最简配置
       run: |
         cd $HOME/kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
 
-        # 使用默认配置
-        make camellia_defconfig
+        echo "===== 生成默认配置 ====="
+        make camellia_defconfig 2>&1 | tail -50
 
-        # 应用修复配置
-        cat >> .config << 'EOF'
-        # 基本配置
-        CONFIG_LOCALVERSION="-KernelSU-minimal"
-        CONFIG_LOCALVERSION_AUTO=n
+        echo ""
+        echo "===== 检查配置文件 ====="
+        if [ -f ".config" ]; then
+          echo "配置文件生成成功"
+          echo "配置行数: $(wc -l .config)"
+        else
+          echo "错误：配置文件未生成"
+        fi
 
-        # 禁用有问题的功能
-        CONFIG_CC_STACKPROTECTOR_STRONG=n
-        CONFIG_CC_STACKPROTECTOR=n
-        CONFIG_STACKPROTECTOR=n
-        CONFIG_STACKPROTECTOR_STRONG=n
-
-        # 禁用不必要的功能以减少编译错误
-        CONFIG_PM_DEVFREQ=n
-        CONFIG_MTK_DVFSRC=n
-        CONFIG_COMMON_CLK_MT6833=n
-        CONFIG_BLK_INLINE_ENCRYPTION=n
-        CONFIG_FS_ENCRYPTION_INLINE_CRYPT=n
-
-        # 启用KernelSU
-        CONFIG_KPROBES=y
-        CONFIG_HAVE_KPROBES=y
-        CONFIG_KPROBE_EVENTS=y
-        CONFIG_MODULES=y
-        CONFIG_MODULE_UNLOAD=y
-        CONFIG_KSU=y
-        EOF
-
-        # 更新配置
+        # 添加KernelSU配置
+        echo "CONFIG_KSU=y" >> .config
         make olddefconfig
 
-        echo "配置状态："
-        grep -E "KSU|KPROBES" .config
-
-    - name: 编译内核（分步骤）
+    - name: 尝试最简单编译
       run: |
         cd $HOME/kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         export KCFLAGS="-w"
-        export KAFLAGS="-w"
 
-        echo "===== 开始编译 ====="
+        echo "===== 开始编译prepare ====="
+        make prepare 2>&1 | tail -100
 
-        # 首先尝试编译vmlinux
-        echo "步骤1：编译vmlinux..."
-        make -j$(nproc) vmlinux 2>&1 | tail -n 100 || true
+        echo ""
+        echo "===== 尝试编译scripts ====="
+        make scripts 2>&1 | tail -100
 
-        # 然后尝试编译Image
-        echo "步骤2：编译Image..."
-        make -j$(nproc) Image 2>&1 | tail -n 100 || true
+        echo ""
+        echo "===== 尝试编译vmlinux ====="
+        timeout 15m make -j2 vmlinux 2>&1 | tail -200 || {
+          echo "vmlinux编译超时或失败"
+        }
 
-        # 检查结果
-        echo "===== 检查编译结果 ====="
+        echo ""
+        echo "===== 查找任何编译输出 ====="
+        find . -name "*.o" -type f 2>/dev/null | head -20
+        find . -name "vmlinux*" -type f 2>/dev/null
+        find . -name "*Image*" -type f 2>/dev/null
 
+        echo ""
+        echo "===== 检查是否有部分编译成功 ====="
         if [ -f "vmlinux" ]; then
-          echo "✅ 找到vmlinux"
+          echo "✅ vmlinux存在"
           ls -lh vmlinux
-          # 从vmlinux提取Image
-          aarch64-linux-gnu-objcopy -O binary vmlinux arch/arm64/boot/Image 2>/dev/null || true
         fi
 
-        if [ -f "arch/arm64/boot/Image" ]; then
-          echo "✅ 找到Image"
-          ls -lh arch/arm64/boot/Image
-
-          # 压缩
-          gzip -c arch/arm64/boot/Image > arch/arm64/boot/Image.gz
-
-          # 创建假DTB（临时方案）
-          echo "DTB_PLACEHOLDER" > fake.dtb
-          cat arch/arm64/boot/Image.gz fake.dtb > arch/arm64/boot/Image.gz-dtb
-
-          echo "✅ 创建了Image.gz-dtb"
-          ls -lh arch/arm64/boot/Image.gz-dtb
-        else
-          echo "⚠️ 未找到Image，尝试查找其他内核文件..."
-          find . -name "*Image*" -type f 2>/dev/null | head -10
-          find . -name "vmlinux*" -type f 2>/dev/null | head -10
+        if [ -d "arch/arm64/boot" ]; then
+          echo "boot目录内容："
+          ls -la arch/arm64/boot/
         fi
 
-    - name: 打包产物
+    - name: 尝试绕过编译直接打包
       run: |
         mkdir -p output
-
-        # 尝试复制任何找到的内核文件
-        if [ -f "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" ]; then
-          cp "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" output/
-          echo "使用Image.gz-dtb"
-        elif [ -f "$HOME/kernel/arch/arm64/boot/Image" ]; then
-          gzip -c "$HOME/kernel/arch/arm64/boot/Image" > output/Image.gz-dtb
-          echo "使用Image（压缩后）"
-        elif [ -f "$HOME/kernel/vmlinux" ]; then
-          echo "只有vmlinux，尝试提取..."
-          aarch64-linux-gnu-objcopy -O binary "$HOME/kernel/vmlinux" output/Image
-          gzip -c output/Image > output/Image.gz-dtb
-          rm output/Image
-        else
-          echo "警告：未找到任何内核文件"
-          # 创建占位文件
-          echo "KERNEL_NOT_FOUND" > output/Image.gz-dtb
-        fi
-
         cd output
 
-        # 下载magiskboot
-        wget -q https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk-26.4.apk || \
-        wget -q https://ghproxy.com/https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk-26.4.apk
-        unzip -q -j Magisk-26.4.apk 'lib/x86_64/libmagiskboot.so'
-        mv libmagiskboot.so magiskboot
-        chmod +x magiskboot
-        rm Magisk-26.4.apk
+        echo "===== 创建占位内核文件 ====="
+        # 创建一个假的内核文件用于测试打包流程
+        dd if=/dev/zero of=Image.gz-dtb bs=1M count=20
+        echo "创建了20MB的测试文件"
 
-        # 创建脚本
-        cat > make_boot.sh << 'EOF'
-        #!/bin/bash
-        echo "KernelSU极简内核打包工具"
-        echo "========================"
+        echo ""
+        echo "===== 下载magiskboot（使用正确链接）====="
+        # 尝试多个下载源
+        echo "尝试下载Magisk..."
 
-        if [ ! -f boot.img ]; then
-          echo "错误：需要原版boot.img"
-          exit 1
+        # 方法1：直接下载APK
+        wget --no-check-certificate -O Magisk.apk \
+          "https://github.com/topjohnwu/Magisk/releases/download/v26.4/Magisk-26.4.apk" || {
+            echo "主链接失败，尝试备用..."
+            # 方法2：使用镜像
+            wget --no-check-certificate -O Magisk.apk \
+              "https://ghproxy.com/https://github.com/topjohnwu/Magisk/releases/download/v26.4/Magisk-26.4.apk"
+          }
+
+        if [ -f "Magisk.apk" ]; then
+          echo "APK下载成功，大小: $(ls -lh Magisk.apk | awk '{print $5}')"
+
+          # 验证是否为有效的zip文件
+          if unzip -t Magisk.apk > /dev/null 2>&1; then
+            echo "APK文件有效，提取magiskboot..."
+            unzip -j Magisk.apk 'lib/x86_64/libmagiskboot.so' 2>/dev/null || \
+            unzip -j Magisk.apk 'lib/x86/libmagiskboot.so' 2>/dev/null || \
+            unzip -j Magisk.apk '*magiskboot*' 2>/dev/null
+
+            if [ -f "libmagiskboot.so" ]; then
+              mv libmagiskboot.so magiskboot
+              chmod +x magiskboot
+              echo "✅ magiskboot提取成功"
+            else
+              echo "❌ 无法提取magiskboot"
+            fi
+          else
+            echo "APK文件无效"
+          fi
+
+          rm -f Magisk.apk
+        else
+          echo "❌ 无法下载Magisk"
         fi
 
-        # 检查内核文件
-        if [ ! -f Image.gz-dtb ] || [ $(stat -c%s Image.gz-dtb) -lt 1000 ]; then
-          echo "警告：内核文件可能有问题"
-          echo "大小：$(ls -lh Image.gz-dtb)"
-        fi
-
-        ./magiskboot unpack boot.img
-        cp Image.gz-dtb kernel
-        ./magiskboot repack boot.img
-
-        echo ""
-        echo "生成：new-boot.img"
-        echo ""
-        echo "刷入：fastboot flash boot new-boot.img"
-        echo ""
-        echo "⚠️ 这是实验性内核，请先备份！"
-        EOF
-        chmod +x make_boot.sh
-
-        # 创建说明
+        # 创建基本文件
         cat > README.txt << 'EOF'
-        KernelSU极简内核 - 实验版
+        调试版本输出
 
-        状态：这是激进修复版本
-        - 可能成功编译了部分功能
-        - 可能缺少某些驱动
-        - 仅用于测试
-
-        使用风险：
-        1. 可能无法启动
-        2. 可能更耗电
-        3. 某些功能可能失效
-
-        刷入前必须：
-        1. 备份原版boot.img
-        2. 准备救砖工具
-        3. 知道如何进入fastboot
-
-        如果变砖：
-        fastboot flash boot boot_backup.img
+        这不是真正的内核，只是测试打包流程
+        请查看Actions日志了解编译失败原因
         EOF
 
-        ls -lah
+        ls -la
 
-    - name: 上传
+    - name: 分析失败原因
+      if: always()
+      run: |
+        echo "===== 分析编译失败原因 ====="
+
+        if [ -d "$HOME/kernel" ]; then
+          cd $HOME/kernel
+
+          echo "最近的错误日志："
+          dmesg | tail -20 2>/dev/null || true
+
+          echo ""
+          echo "查找错误信息："
+          find . -name "*.log" -type f 2>/dev/null | while read f; do
+            echo "=== $f ==="
+            tail -20 "$f" 2>/dev/null || true
+          done
+        fi
+
+        echo ""
+        echo "===== 磁盘空间 ====="
+        df -h
+
+        echo ""
+        echo "===== 内存使用 ====="
+        free -h
+
+    - name: 上传调试信息
+      if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: KernelSU-Experimental
+        name: Debug-Output
         path: output/
 
     - name: 摘要
+      if: always()
       run: |
-        echo "# 🧪 实验性内核编译完成" >> $GITHUB_STEP_SUMMARY
+        echo "# 🔍 调试信息" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        if [ -f "$HOME/kernel/arch/arm64/boot/Image.gz-dtb" ]; then
-          echo "## ✅ 编译可能成功" >> $GITHUB_STEP_SUMMARY
-          echo "- 找到Image.gz-dtb文件" >> $GITHUB_STEP_SUMMARY
-        elif [ -f "$HOME/kernel/arch/arm64/boot/Image" ]; then
-          echo "## ⚠️ 部分成功" >> $GITHUB_STEP_SUMMARY
-          echo "- 只找到Image文件" >> $GITHUB_STEP_SUMMARY
+        echo "## 编译状态" >> $GITHUB_STEP_SUMMARY
+        if [ -f "$HOME/kernel/vmlinux" ]; then
+          echo "- ✅ vmlinux生成" >> $GITHUB_STEP_SUMMARY
         else
-          echo "## ❌ 编译状态未知" >> $GITHUB_STEP_SUMMARY
-          echo "- 未找到标准内核文件" >> $GITHUB_STEP_SUMMARY
+          echo "- ❌ vmlinux未生成" >> $GITHUB_STEP_SUMMARY
         fi
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "## ⚠️ 重要提醒" >> $GITHUB_STEP_SUMMARY
-        echo "1. 这是实验性版本" >> $GITHUB_STEP_SUMMARY
-        echo "2. 可能无法正常启动" >> $GITHUB_STEP_SUMMARY
-        echo "3. 必须先备份原版boot.img" >> $GITHUB_STEP_SUMMARY
+        echo "## 可能的问题" >> $GITHUB_STEP_SUMMARY
+        echo "1. 内核源码本身有严重bug" >> $GITHUB_STEP_SUMMARY
+        echo "2. 缺少必要的配置" >> $GITHUB_STEP_SUMMARY
+        echo "3. 编译环境问题" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "请查看完整日志了解详情" >> $GITHUB_STEP_SUMMARY
