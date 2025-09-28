@@ -128,7 +128,7 @@ jobs:
         make camellia_defconfig
 
         # 添加KernelSU和必要配置
-        cat >> .config << 'EOF'
+        cat >> .config << 'CONFIG_EOF'
         CONFIG_KSU=y
         CONFIG_KPROBES=y
         CONFIG_HAVE_KPROBES=y
@@ -139,7 +139,7 @@ jobs:
         CONFIG_CPU_IDLE_GOV_MENU=n
         CONFIG_BLK_INLINE_ENCRYPTION=n
         CONFIG_FS_ENCRYPTION_INLINE_CRYPT=n
-        EOF
+        CONFIG_EOF
 
         # 更新配置
         make olddefconfig
@@ -234,82 +234,82 @@ jobs:
         fi
 
         # 创建打包脚本
-        cat > make_boot.sh << 'EOF'
-#!/bin/bash
-echo "KernelSU Boot.img 制作工具"
-echo "=========================="
+        cat > make_boot.sh << 'SCRIPT_EOF'
+        #!/bin/bash
+        echo "KernelSU Boot.img 制作工具"
+        echo "=========================="
 
-if [ ! -f boot.img ]; then
-  echo "错误：请放入原版boot.img"
-  exit 1
-fi
+        if [ ! -f boot.img ]; then
+          echo "错误：请放入原版boot.img"
+          exit 1
+        fi
 
-if [ ! -f magiskboot ]; then
-  echo "警告：magiskboot未找到，请手动下载"
-  echo "下载地址：https://github.com/topjohnwu/Magisk/releases"
-  exit 1
-fi
+        if [ ! -f magiskboot ]; then
+          echo "警告：magiskboot未找到，请手动下载"
+          echo "下载地址：https://github.com/topjohnwu/Magisk/releases"
+          exit 1
+        fi
 
-./magiskboot unpack boot.img
-cp Image.gz-dtb kernel
-./magiskboot repack boot.img
+        ./magiskboot unpack boot.img
+        cp Image.gz-dtb kernel
+        ./magiskboot repack boot.img
 
-echo ""
-echo "✅ 完成！生成文件：new-boot.img"
-echo ""
-echo "刷入方法："
-echo "  fastboot flash boot new-boot.img"
-echo ""
-echo "注意事项："
-echo "1. 请先备份原版boot.img"
-echo "2. 首次启动可能较慢"
-echo "3. 刷入后安装KernelSU管理器APP"
-EOF
+        echo ""
+        echo "✅ 完成！生成文件：new-boot.img"
+        echo ""
+        echo "刷入方法："
+        echo "  fastboot flash boot new-boot.img"
+        echo ""
+        echo "注意事项："
+        echo "1. 请先备份原版boot.img"
+        echo "2. 首次启动可能较慢"
+        echo "3. 刷入后安装KernelSU管理器APP"
+        SCRIPT_EOF
         chmod +x make_boot.sh
 
         # 创建说明文件
-        cat > README.txt << 'EOF'
-KernelSU内核 - 红米Note 10 5G (camellia)
-========================================
+        cat > README.txt << 'README_EOF'
+        KernelSU内核 - 红米Note 10 5G (camellia)
+        ========================================
 
-版本信息：
-- 基于小米官方camellia-r-oss内核源码
-- 集成KernelSU 0.9.5（最后支持非GKI设备的版本）
-- 使用GCC 8编译以提高兼容性
+        版本信息：
+        - 基于小米官方camellia-r-oss内核源码
+        - 集成KernelSU 0.9.5（最后支持非GKI设备的版本）
+        - 使用GCC 8编译以提高兼容性
 
-文件说明：
-- Image.gz-dtb: 编译好的内核文件
-- make_boot.sh: 打包脚本
-- magiskboot: 打包工具（如果下载成功）
+        文件说明：
+        - Image.gz-dtb: 编译好的内核文件
+        - make_boot.sh: 打包脚本
+        - magiskboot: 打包工具（如果下载成功）
 
-使用步骤：
-1. 提取你手机的原版boot.img
-   adb shell su -c dd if=/dev/block/by-name/boot of=/sdcard/boot.img
-   adb pull /sdcard/boot.img
+        使用步骤：
+        1. 提取你手机的原版boot.img
+           adb shell su -c dd if=/dev/block/by-name/boot of=/sdcard/boot.img
+           adb pull /sdcard/boot.img
 
-2. 将boot.img放到本目录
+        2. 将boot.img放到本目录
 
-3. 运行打包脚本
-   ./make_boot.sh
+        3. 运行打包脚本
+           ./make_boot.sh
 
-4. 刷入新内核
-   adb reboot bootloader
-   fastboot flash boot new-boot.img
-   fastboot reboot
+        4. 刷入新内核
+           adb reboot bootloader
+           fastboot flash boot new-boot.img
+           fastboot reboot
 
-5. 安装KernelSU管理器
-   从 https://github.com/tiann/KernelSU/releases 下载APK
+        5. 安装KernelSU管理器
+           从 https://github.com/tiann/KernelSU/releases 下载APK
 
-重要提醒：
-⚠️ 刷机有风险，请确保：
-- 已解锁Bootloader
-- 已备份原版boot.img
-- 知道如何进入fastboot救砖
-- 电量充足（>50%）
+        重要提醒：
+        ⚠️ 刷机有风险，请确保：
+        - 已解锁Bootloader
+        - 已备份原版boot.img
+        - 知道如何进入fastboot救砖
+        - 电量充足（>50%）
 
-如果变砖：
-fastboot flash boot boot_backup.img
-EOF
+        如果变砖：
+        fastboot flash boot boot_backup.img
+        README_EOF
 
         ls -lah
 
