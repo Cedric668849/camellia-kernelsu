@@ -11,7 +11,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
     - name: 检出仓库
@@ -147,32 +147,50 @@ jobs:
 
         echo "KernelSU集成配置完成"
 
-    - name: 修复头文件路径
+    - name: 全面修复MediaTek头文件问题
       run: |
         cd $HOME/kernel
 
-        echo "修复MediaTek头文件包含路径..."
+        echo "===== 开始全面修复头文件包含问题 ====="
 
-        # 方法1：修改源文件使用相对路径
-        if [ -f "drivers/clk/mediatek/clkdbg-mt6833.c" ]; then
-          sed -i 's|#include <clk-mux.h>|#include "./clk-mux.h"|g' drivers/clk/mediatek/clkdbg-mt6833.c
-          echo "已修复clkdbg-mt6833.c"
-        fi
+        # 查找所有有问题的头文件包含
+        echo "查找所有使用尖括号的本地头文件..."
 
-        if [ -f "drivers/cpuidle/cpuidle-mediatek.c" ]; then
-          sed -i 's|#include <dt_idle_states.h>|#include "./dt_idle_states.h"|g' drivers/cpuidle/cpuidle-mediatek.c
-          echo "已修复cpuidle-mediatek.c"
-        fi
+        # 修复clk-mux.h
+        find . -name "*.c" -exec grep -l "#include <clk-mux.h>" {} \; | while read file; do
+          echo "修复: $file"
+          sed -i 's|#include <clk-mux.h>|#include "clk-mux.h"|g' "$file"
+        done
 
-        # 方法2：复制头文件到include目录（备用）
-        if [ -f "drivers/clk/mediatek/clk-mux.h" ]; then
-          mkdir -p include/linux/clk/mediatek/
-          cp drivers/clk/mediatek/*.h include/linux/clk/mediatek/ 2>/dev/null || true
-        fi
+        # 修复dt_idle_states.h
+        find . -name "*.c" -exec grep -l "#include <dt_idle_states.h>" {} \; | while read file; do
+          echo "修复: $file"
+          sed -i 's|#include <dt_idle_states.h>|#include "dt_idle_states.h"|g' "$file"
+        done
 
-        echo "头文件路径修复完成"
+        # 修复helio-dvfsrc-qos.h
+        find . -name "*.c" -exec grep -l "#include <helio-dvfsrc-qos.h>" {} \; | while read file; do
+          echo "修复: $file"
+          sed -i 's|#include <helio-dvfsrc-qos.h>|#include "helio-dvfsrc-qos.h"|g' "$file"
+        done
 
-    - name: 配置内核
+        # 修复其他MediaTek特定头文件
+        echo "修复其他MediaTek头文件..."
+
+        # 通用修复：将所有本地头文件的尖括号改为引号
+        find drivers/clk/mediatek -name "*.c" -exec sed -i 's|#include <\(.*\)>|#include "\1"|g' {} \; 2>/dev/null || true
+        find drivers/cpuidle -name "*.c" -exec sed -i 's|#include <\(.*\)>|#include "\1"|g' {} \; 2>/dev/null || true
+        find drivers/devfreq -name "*.c" -exec sed -i 's|#include <\(.*\)>|#include "\1"|g' {} \; 2>/dev/null || true
+
+        # 恢复系统头文件（避免误改）
+        find . -name "*.c" -exec sed -i 's|#include "linux/|#include <linux/|g' {} \; 2>/dev/null || true
+        find . -name "*.c" -exec sed -i 's|#include "asm/|#include <asm/|g' {} \; 2>/dev/null || true
+        find . -name "*.c" -exec sed -i 's|#include "net/|#include <net/|g' {} \; 2>/dev/null || true
+        find . -name "*.c" -exec sed -i 's|#include "uapi/|#include <uapi/|g' {} \; 2>/dev/null || true
+
+        echo "===== 头文件修复完成 ====="
+
+    - name: 配置内核（禁用问题驱动）
       run: |
         cd $HOME/kernel
 
@@ -184,8 +202,10 @@ jobs:
         echo "应用默认配置..."
         make camellia_defconfig
 
-        # 禁用有编译问题的驱动（这些不是必需的）
-        echo "禁用问题驱动..."
+        echo "===== 开始禁用问题驱动 ====="
+
+        # 禁用MT6833相关驱动（camellia使用的是定制版，不需要标准MT6833驱动）
+        echo "禁用MT6833时钟驱动..."
         scripts/config --disable CONFIG_COMMON_CLK_MT6833
         scripts/config --disable CONFIG_COMMON_CLK_MT6833_AUDIO
         scripts/config --disable CONFIG_COMMON_CLK_MT6833_CAMSYS
@@ -196,8 +216,28 @@ jobs:
         scripts/config --disable CONFIG_COMMON_CLK_MT6833_MMSYS
         scripts/config --disable CONFIG_COMMON_CLK_MT6833_VDECSYS
         scripts/config --disable CONFIG_COMMON_CLK_MT6833_VENCSYS
+
+        # 禁用有问题的CPUIDLE驱动
+        echo "禁用CPUIDLE相关驱动..."
         scripts/config --disable CONFIG_MTK_IDLE_BALANCE_ENHANCEMENT
         scripts/config --disable CONFIG_MTK_CPUIDLE
+
+        # 禁用DVFSRC相关驱动（有编译问题）
+        echo "禁用DVFSRC驱动..."
+        scripts/config --disable CONFIG_MTK_DVFSRC
+        scripts/config --disable CONFIG_MTK_DVFSRC_DEVFREQ
+        scripts/config --disable CONFIG_HELIO_DVFSRC_V3
+        scripts/config --disable CONFIG_ARM_MT6833_CPUFREQ
+        scripts/config --disable CONFIG_ARM_MEDIATEK_CPUFREQ
+
+        # 禁用devfreq相关（如果还有问题）
+        echo "禁用DEVFREQ驱动..."
+        scripts/config --disable CONFIG_PM_DEVFREQ
+        scripts/config --disable CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND
+        scripts/config --disable CONFIG_DEVFREQ_GOV_PERFORMANCE
+        scripts/config --disable CONFIG_DEVFREQ_GOV_POWERSAVE
+        scripts/config --disable CONFIG_DEVFREQ_GOV_USERSPACE
+        scripts/config --disable CONFIG_DEVFREQ_GOV_PASSIVE
 
         # 禁用栈保护（避免编译器兼容问题）
         echo "禁用栈保护..."
@@ -213,6 +253,7 @@ jobs:
         scripts/config --enable CONFIG_KPROBE_EVENTS
         scripts/config --enable CONFIG_MODULES
         scripts/config --enable CONFIG_MODULE_UNLOAD
+        scripts/config --enable CONFIG_MODULE_FORCE_UNLOAD
 
         # 添加KernelSU配置
         echo "CONFIG_KSU=y" >> .config
@@ -221,15 +262,13 @@ jobs:
         # 更新配置
         make olddefconfig
 
-        echo "内核配置完成，验证关键配置:"
-        echo "================="
-        echo "KernelSU状态:"
-        grep -E "CONFIG_KSU" .config || echo "未找到KSU配置"
-        echo "KPROBES状态:"
-        grep -E "CONFIG_KPROBES" .config || echo "未找到KPROBES配置"
-        echo "问题驱动状态:"
-        grep -E "CONFIG_COMMON_CLK_MT6833|CONFIG_MTK_CPUIDLE" .config || echo "问题驱动已禁用"
-        echo "================="
+        echo "===== 内核配置完成 ====="
+        echo "验证关键配置:"
+        echo "KernelSU: $(grep CONFIG_KSU=y .config && echo '已启用' || echo '未启用')"
+        echo "KPROBES: $(grep CONFIG_KPROBES=y .config && echo '已启用' || echo '未启用')"
+        echo "DVFSRC: $(grep CONFIG_MTK_DVFSRC .config || echo '已禁用')"
+        echo "DEVFREQ: $(grep CONFIG_PM_DEVFREQ .config || echo '已禁用')"
+        echo "MT6833: $(grep CONFIG_COMMON_CLK_MT6833 .config || echo '已禁用')"
 
     - name: 编译内核
       run: |
@@ -243,11 +282,14 @@ jobs:
         export CONFIG_CC_STACKPROTECTOR_STRONG=n
 
         echo "开始编译内核 (使用 $(nproc) 线程)..."
-        echo "预计需要15-20分钟..."
+        echo "预计需要15-25分钟..."
         echo "================="
 
-        # 编译内核镜像（显示更多输出以便调试）
-        make -j$(nproc) Image.gz-dtb 2>&1 | tail -n 200
+        # 清理之前的编译（如果有）
+        make clean
+
+        # 编译内核镜像
+        make -j$(nproc) Image.gz-dtb 2>&1 | tee compile.log | tail -n 100
 
         # 检查编译结果
         if [ -f arch/arm64/boot/Image.gz-dtb ]; then
@@ -257,6 +299,8 @@ jobs:
         else
           echo "================="
           echo "❌ 内核编译失败"
+          echo "显示最后50行编译日志："
+          tail -n 50 compile.log
           echo "尝试查找可能的内核文件..."
           find arch/arm64/boot/ -name "Image*" -type f
           exit 1
